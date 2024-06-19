@@ -1,0 +1,4 @@
+id,attr,nm_1,nm_2,start_date,end_date
+3,old system,we,we,2019-02-01,9999-12-31
+4,Scala,qe,qe,2019-02-02,9999-12-31
+6,C,ad,ad,2019-02-04,9999-12-31
