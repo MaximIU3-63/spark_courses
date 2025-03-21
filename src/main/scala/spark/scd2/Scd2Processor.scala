@@ -99,24 +99,30 @@ private class Scd2Processor(config: Scd2Config) {
   // Формирование датафрейма с новыми и обновленными данными
   private def prepareUpsertRecords(changesDF: DataFrame): DataFrame = {
 
-    val commonColumns = {
-      changesDF.
-        columns.
-        filter(col => !config.technicalColumn.technicalColNameList.contains(col) && col != Constants.SHA).
-        map(col)
-    }
-
-    changesDF.
-      drop(Constants.SHA).
-      select(
-        commonColumns ++ Array(
-          lit(DateFormat.formatDateColumn(current_date(), ISO_8601)).as(config.effectiveDateFrom),
-          lit(Dates.closeDateValue).as(config.effectiveDateTo),
-          lit("true").as(config.isActiveCol),
-          lit(DateFormat.formatDateColumn(current_date(), ISO_8601)).as(config.technicalColumn.sysdateDt),
-          lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)).as(config.technicalColumn.sysdateDttm)
-        ): _*
-      )
+    //    val commonColumns = {
+    //      changesDF.
+    //        columns.
+    //        filter(col => !config.technicalColumn.technicalColNameList.contains(col) && col != Constants.SHA).
+    //        map(col)
+    //    }
+    //
+    //    changesDF.
+    //      drop(Constants.SHA).
+    //      select(
+    //        commonColumns ++ Array(
+    //          lit(DateFormat.formatDateColumn(current_date(), ISO_8601)).as(config.effectiveDateFrom),
+    //          lit(Dates.closeDateValue).as(config.effectiveDateTo),
+    //          lit("true").as(config.isActiveCol),
+    //          lit(DateFormat.formatDateColumn(current_date(), ISO_8601)).as(config.technicalColumn.sysdateDt),
+    //          lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)).as(config.technicalColumn.sysdateDttm)
+    //        ): _*
+    //      )
+    changesDF
+      .withColumn(config.effectiveDateFrom, lit(DateFormat.formatDateColumn(current_date(), ISO_8601)))
+      .withColumn(config.effectiveDateTo, lit(Dates.closeDateValue))
+      .withColumn(config.isActiveCol, lit("true"))
+      .withColumn(config.technicalColumn.sysdateDt, lit(DateFormat.formatDateColumn(current_date(), ISO_8601)))
+      .withColumn(config.technicalColumn.sysdateDttm, lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)))
   }
 
   /** Объединение датафреймов */
