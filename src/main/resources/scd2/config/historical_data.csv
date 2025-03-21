@@ -1,0 +1,6 @@
+user_id;fio;email;address;effective_from_dt;effective_to_dt;is_active;sysdate_dt;sysdate_dttm
+1;QAZ;user1@old.com;"Old Street 1";2020-01-01;2023-01-01;false;2023-01-01;2023-01-01 12:00:00
+2;MVP;user2@current.com;"Current Ave 5";2021-05-15;5999-12-31;true;2023-01-01;2023-01-01 12:00:00
+1;QWE;user1@new.com;"New Street 2";2023-01-01;5999-12-31;true;2023-01-01;2023-01-01 12:00:00
+3;GHJ;user3@inactive.com;"Inactive Lane 7";2022-03-10;2023-03-10;false;2023-01-01;2023-01-01 12:00:00
+2;POI;user2@old.com;"Old Address 3";2019-07-01;2021-05-15;false;2023-01-01;2023-01-01 12:00:00

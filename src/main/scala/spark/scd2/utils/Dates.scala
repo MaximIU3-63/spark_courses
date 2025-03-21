@@ -4,7 +4,7 @@ import org.apache.spark.sql.Column
 import org.apache.spark.sql.functions.date_format
 
 private[scd2] object Dates {
-  lazy val closeDateValue: String = "5999-12-31 00:00:00"
+  lazy val closeDateValue: String = "5999-12-31"
 }
 
 sealed trait DateFormatter

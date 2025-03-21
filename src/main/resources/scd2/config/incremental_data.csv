@@ -1,0 +1,5 @@
+user_id;fio;email;address;sysdate_dt;sysdate_dttm
+1;QAZ;user1@brandnew.com;"Brand New Address 15";2023-09-01;2023-09-01 09:30:00
+2;MVP;user2@updated.com;"Updated Address 99";2023-09-01;2023-09-01 09:30:00
+4;YUI;user4@new.com;"New User Street 1";2023-09-01;2023-09-01 09:30:00
+3;GHJ;user3@reactivated.com;"Reactivated Road 5";2023-09-01;2023-09-01 09:30:00
