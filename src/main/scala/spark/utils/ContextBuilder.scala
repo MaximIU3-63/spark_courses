@@ -14,5 +14,5 @@ trait ContextBuilder {
 
   val appName: String
 
-  lazy val spark: SparkSession = createSparkSession(appName)
+  lazy implicit val spark: SparkSession = createSparkSession(appName)
 }
