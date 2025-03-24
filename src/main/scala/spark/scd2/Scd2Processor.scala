@@ -11,11 +11,11 @@ case class TechnicalColumns(
                              sysdateDt: String = "sysdate_dt",
                              sysdateDttm: String = "sysdate_dttm"
                            ) {
-  // Кэшируем список технических колонок
-  val technicalColNameList: List[String] = List(sysdateDt, sysdateDttm)
+  // Формироруем список технических колонок
+  val getParamsAsSeq: List[String] = this.productIterator.map(_.toString).toList
 }
 
-private case class Scd2Config(
+private case class SCD2Config(
                                primaryKeyColumns: Seq[String],
                                sensitiveKeysColumns: Seq[String],
                                effectiveDateFrom: String = "effective_from_dt",
@@ -25,9 +25,10 @@ private case class Scd2Config(
                              ) {
   require(primaryKeyColumns.nonEmpty, Messages.requireMessage("primaryKeyColumns"))
   require(primaryKeyColumns.nonEmpty, Messages.requireMessage("sensitiveKeysColumns"))
+  require(primaryKeyColumns.intersect(sensitiveKeysColumns).isEmpty, "Primary and sensitive columns must not overlap")
 }
 
-private class Scd2Processor(config: Scd2Config) {
+private class Scd2Processor(config: SCD2Config) {
 
   /** Основной метод обработки SCD2 */
   def process(existingDF: DataFrame, incomingDF: DataFrame): DataFrame = {
@@ -70,16 +71,16 @@ private class Scd2Processor(config: Scd2Config) {
     val hashColumns = (config.primaryKeyColumns ++ config.sensitiveKeysColumns).map(col)
 
     val existingWithHashDF = existingDF.
-      select(config.primaryKeyColumns.map(col) :+ sha1(concat(hashColumns: _*)).as(Constants.SHA): _*)
+      select(config.primaryKeyColumns.map(col) :+ sha1(concat(hashColumns: _*)).as(Constants.HASH_COLUMN): _*)
 
     val incomingWithHashDF = incomingDF.
-      select(incomingDF.columns.map(col) :+ sha1(concat(hashColumns: _*)).as(Constants.SHA): _*)
+      select(incomingDF.columns.map(col) :+ sha1(concat(hashColumns: _*)).as(Constants.HASH_COLUMN): _*)
 
     existingWithHashDF.alias("existing").
       join(incomingWithHashDF.as("incoming"), config.primaryKeyColumns, "full_outer").
       filter(coalesce(
-        existingWithHashDF(Constants.SHA) =!= incomingWithHashDF(Constants.SHA),
-        existingWithHashDF(Constants.SHA).isNotNull || incomingWithHashDF(Constants.SHA).isNotNull
+        existingWithHashDF(Constants.HASH_COLUMN) =!= incomingWithHashDF(Constants.HASH_COLUMN),
+        existingWithHashDF(Constants.HASH_COLUMN).isNotNull || incomingWithHashDF(Constants.HASH_COLUMN).isNotNull
       )).
       select(incomingDF.columns.map(col): _*)
   }
@@ -102,12 +103,12 @@ private class Scd2Processor(config: Scd2Config) {
     //    val commonColumns = {
     //      changesDF.
     //        columns.
-    //        filter(col => !config.technicalColumn.technicalColNameList.contains(col) && col != Constants.SHA).
+    //        filter(col => !config.technicalColumn.technicalColNameList.contains(col) && col != Constants.HASH_COLUMN).
     //        map(col)
     //    }
     //
     //    changesDF.
-    //      drop(Constants.SHA).
+    //      drop(Constants.HASH_COLUMN).
     //      select(
     //        commonColumns ++ Array(
     //          lit(DateFormat.formatDateColumn(current_date(), ISO_8601)).as(config.effectiveDateFrom),
@@ -150,7 +151,7 @@ object Scd2Processor extends App {
     .option("delimiter", ";")
     .csv("src/main/resources/scd2/config/incremental_data.csv")
 
-  private val scd2Config = Scd2Config(
+  private val scd2Config = SCD2Config(
     primaryKeyColumns = Seq("user_id"),
     sensitiveKeysColumns = Seq("email", "address"),
     technicalColumn = TechnicalColumns()
