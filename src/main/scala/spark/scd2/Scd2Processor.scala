@@ -1,6 +1,7 @@
 package spark.scd2
 
 import org.apache.spark.sql.functions.{coalesce, col, concat, current_date, current_timestamp, lit, sha1}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.storage.StorageLevel
 import spark.scd2.utils.{CacheManager, Constants, DateFormat, Dates, Filters, ISO_8601, ISO_8601_EXTENDED, Messages}
@@ -44,16 +45,21 @@ private class Scd2Processor(config: SCD2Config) {
     val changesDF = detectChanges(existingActiveDF, incomingDF).
       persist(StorageLevel.MEMORY_AND_DISK)
 
-    // 4. Формирование датафрейма с данными, которые переходят в статус "неактульные"
-    val updateExistingDF = expireOldRecords(existingActiveDF, changesDF)
+    // 4. Формирование датафрейма с данными, для которых нет изменений
+    val unchangedActiveRecordsDF: DataFrame = getUnchangedActiveRecords(existingActiveDF, changesDF)
 
-    // 5. Формирование датафрейма с обновленными и новыми данными
-    val upsertRecordsDF = prepareUpsertRecords(changesDF)
+    val existingSchema = existingDF.schema
 
-    // 6. Объединение все данных
-    val scd2DF = combineDataFrames(existingNoActiveDF, updateExistingDF, upsertRecordsDF)
+    // 5. Формирование датафрейма с данными, которые переходят в статус "неактульные"
+    val updateExistingDF = castColumnsToTargetSchema(existingSchema, expireOldRecords(existingActiveDF, changesDF))
 
-    // 7. Возврат результирующего датафрейма
+    // 6. Формирование датафрейма с обновленными и новыми данными
+    val upsertRecordsDF = castColumnsToTargetSchema(existingSchema, prepareUpsertRecords(changesDF))
+
+    // 7. Объединение все данных
+    val scd2DF = combineDataFrames(existingNoActiveDF, unchangedActiveRecordsDF, updateExistingDF, upsertRecordsDF)
+
+    // 8. Возврат результирующего датафрейма
     scd2DF
   }
 
@@ -79,10 +85,20 @@ private class Scd2Processor(config: SCD2Config) {
     existingWithHashDF.alias("existing").
       join(incomingWithHashDF.as("incoming"), config.primaryKeyColumns, "full_outer").
       filter(coalesce(
-        existingWithHashDF(Constants.HASH_COLUMN) =!= incomingWithHashDF(Constants.HASH_COLUMN),
+        existingWithHashDF(Constants.HASH_COLUMN) =!= incomingWithHashDF(Constants.HASH_COLUMN) &&
+          incomingWithHashDF(Constants.HASH_COLUMN).isNotNull,
         existingWithHashDF(Constants.HASH_COLUMN).isNotNull || incomingWithHashDF(Constants.HASH_COLUMN).isNotNull
       )).
       select(incomingDF.columns.map(col): _*)
+  }
+
+  /** Нахождение активных записей без изменений */
+  private def getUnchangedActiveRecords(existingActiveDF: DataFrame, changesDF: DataFrame): DataFrame = {
+    existingActiveDF.join(
+      changesDF.select(config.primaryKeyColumns.map(col): _*),
+      config.primaryKeyColumns,
+      "left_anti"
+    )
   }
 
   /** Закрытие устаревших записей */
@@ -99,25 +115,6 @@ private class Scd2Processor(config: SCD2Config) {
 
   // Формирование датафрейма с новыми и обновленными данными
   private def prepareUpsertRecords(changesDF: DataFrame): DataFrame = {
-
-    //    val commonColumns = {
-    //      changesDF.
-    //        columns.
-    //        filter(col => !config.technicalColumn.technicalColNameList.contains(col) && col != Constants.HASH_COLUMN).
-    //        map(col)
-    //    }
-    //
-    //    changesDF.
-    //      drop(Constants.HASH_COLUMN).
-    //      select(
-    //        commonColumns ++ Array(
-    //          lit(DateFormat.formatDateColumn(current_date(), ISO_8601)).as(config.effectiveDateFrom),
-    //          lit(Dates.closeDateValue).as(config.effectiveDateTo),
-    //          lit("true").as(config.isActiveCol),
-    //          lit(DateFormat.formatDateColumn(current_date(), ISO_8601)).as(config.technicalColumn.sysdateDt),
-    //          lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)).as(config.technicalColumn.sysdateDttm)
-    //        ): _*
-    //      )
     changesDF
       .withColumn(config.effectiveDateFrom, lit(DateFormat.formatDateColumn(current_date(), ISO_8601)))
       .withColumn(config.effectiveDateTo, lit(Dates.closeDateValue))
@@ -130,6 +127,23 @@ private class Scd2Processor(config: SCD2Config) {
   private def combineDataFrames(dfs: DataFrame*): DataFrame =
     dfs.reduceLeft(_ unionByName _)
       .orderBy(config.primaryKeyColumns.map(col): _*)
+
+  private def castColumnsToTargetSchema(existingSrcSchema: StructType, incomingDF: DataFrame): DataFrame = {
+    val existingSchema = existingSrcSchema.map {
+      f => (f.name, f.dataType)
+    }.toMap
+
+    val incomingCastedDF = incomingDF.columns.map {
+      colName => existingSchema.get(colName) match {
+        case Some(colType) => incomingDF(colName).cast(colType).as(colName)
+        case None => incomingDF(colName)
+      }
+    }
+
+    incomingDF.
+      select(incomingCastedDF: _*).
+      select(existingSrcSchema.map(c => col(c.name)): _*)
+  }
 }
 
 object Scd2Processor extends App {
