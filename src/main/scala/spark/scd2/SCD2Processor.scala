@@ -8,11 +8,8 @@ import spark.scd2.utils.{CacheManager, Constants, DateFormat, Dates, Filters, IS
 
 import scala.util.{Failure, Success}
 
-case class TechnicalColumns(
-                             sysdateDt: String = "sysdate_dt",
-                             sysdateDttm: String = "sysdate_dttm"
-                           ) {
-  // Формироруем список технических колонок
+case class TechnicalColumns(sysdateDt: String = "sysdate_dt", sysdateDttm: String = "sysdate_dttm") {
+  // Формируем список технических колонок
   val getParamsAsSeq: List[String] = this.productIterator.map(_.toString).toList
 }
 
@@ -34,32 +31,32 @@ private class Scd2Processor(config: SCD2Config) {
   /** Основной метод обработки SCD2 */
   def process(existingDF: DataFrame, incomingDF: DataFrame): DataFrame = {
 
-    // 1. Отбор строк, которые не трубуется обрабатывать
+    // 1. Отбор строк, которые не требуется обрабатывать
     val existingNoActiveDF = filterNonActive(existingDF)
 
     // 2. Отбор активных строк из существующей таблицы
     val existingActiveDF = filterActive(existingDF).
       persist(StorageLevel.MEMORY_AND_DISK)
 
-    // 3. Формирование датафрейма строк, где есть изменения
+    // 3. Формирование дата фрейма строк, где есть изменения
     val changesDF = detectChanges(existingActiveDF, incomingDF).
       persist(StorageLevel.MEMORY_AND_DISK)
 
-    // 4. Формирование датафрейма с данными, для которых нет изменений
+    // 4. Формирование дата фрейма с данными, для которых нет изменений
     val unchangedActiveRecordsDF: DataFrame = getUnchangedActiveRecords(existingActiveDF, changesDF)
 
     val existingSchema = existingDF.schema
 
-    // 5. Формирование датафрейма с данными, которые переходят в статус "неактульные"
+    // 5. Формирование дата фрейма с данными, которые переходят в статус "неактуальные"
     val updateExistingDF = castColumnsToTargetSchema(existingSchema, expireOldRecords(existingActiveDF, changesDF))
 
-    // 6. Формирование датафрейма с обновленными и новыми данными
+    // 6. Формирование дата фрейма с обновленными и новыми данными
     val upsertRecordsDF = castColumnsToTargetSchema(existingSchema, prepareUpsertRecords(changesDF))
 
     // 7. Объединение все данных
     val scd2DF = combineDataFrames(existingNoActiveDF, unchangedActiveRecordsDF, updateExistingDF, upsertRecordsDF)
 
-    // 8. Возврат результирующего датафрейма
+    // 8. Возврат результирующего дата фрейма
     scd2DF
   }
 
@@ -113,7 +110,7 @@ private class Scd2Processor(config: SCD2Config) {
       withColumn(config.isActiveCol, lit("false"))
   }
 
-  // Формирование датафрейма с новыми и обновленными данными
+  /** Формирование дата фрейма с новыми и обновленными данными */
   private def prepareUpsertRecords(changesDF: DataFrame): DataFrame = {
     changesDF
       .withColumn(config.effectiveDateFrom, lit(DateFormat.formatDateColumn(current_date(), ISO_8601)))
@@ -123,7 +120,7 @@ private class Scd2Processor(config: SCD2Config) {
       .withColumn(config.technicalColumn.sysdateDttm, lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)))
   }
 
-  /** Объединение датафреймов */
+  /** Объединение дата фреймов */
   private def combineDataFrames(dfs: DataFrame*): DataFrame =
     dfs.reduceLeft(_ unionByName _)
       .orderBy(config.primaryKeyColumns.map(col): _*)
@@ -146,7 +143,7 @@ private class Scd2Processor(config: SCD2Config) {
   }
 }
 
-object Scd2Processor extends App {
+object SCD2Processor extends App {
 
   val spark = SparkSession.builder()
     .appName("Test DataFrames")
@@ -173,11 +170,11 @@ object Scd2Processor extends App {
 
   private val processor = new Scd2Processor(scd2Config)
 
-  val scd2DF = processor.process(historicalDF, incrementalDF)
+  private val scd2DF = processor.process(historicalDF, incrementalDF)
 
   scd2DF.show(truncate = false)
 
-  //Очистка кэша, если использовался в время активной сессии spark
+  //Очистка кэша, если использовался во время активной сессии spark
   CacheManager.clearCache(spark) match {
     case Success(_) => println("Cache was cleared successfully.")
     case Failure(e) => println(s"Cache was cleared unsuccessfully: ${e.getMessage}")
