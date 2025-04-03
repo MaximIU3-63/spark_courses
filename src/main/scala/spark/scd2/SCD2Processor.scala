@@ -150,6 +150,7 @@ object SCD2Processor extends App {
     .master("local[*]")
     .getOrCreate()
 
+
   spark.sparkContext.setLogLevel("WARN")
 
   private val historicalDF = spark.read
