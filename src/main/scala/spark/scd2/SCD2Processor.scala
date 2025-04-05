@@ -4,7 +4,8 @@ import org.apache.spark.sql.functions.{coalesce, col, concat, current_date, curr
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.storage.StorageLevel
-import spark.scd2.utils.{CacheManager, Constants, DateFormat, Dates, Filters, ISO_8601, ISO_8601_EXTENDED, Messages}
+import spark.scd2.load.{SCD2WriteConfig, SCD2Writer}
+import spark.scd2.utils.{CacheManager, Constants, DateFormat, Dates, Filters, ISO_8601, ISO_8601_EXTENDED, Messages, SCD2PartitioningConfig}
 
 import scala.util.{Failure, Success}
 
@@ -26,13 +27,13 @@ private case class SCD2Config(
   require(primaryKeyColumns.intersect(sensitiveKeysColumns).isEmpty, "Primary and sensitive columns must not overlap")
 }
 
-private class Scd2Processor(config: SCD2Config) {
+private class SCD2Processor(config: SCD2Config) {
 
   /** Основной метод обработки SCD2 */
   def process(existingDF: DataFrame, incomingDF: DataFrame): DataFrame = {
 
     // 1. Отбор строк, которые не требуется обрабатывать
-    val existingNoActiveDF = filterNonActive(existingDF)
+    val existingNoActiveDF = filterInactive(existingDF)
 
     // 2. Отбор активных строк из существующей таблицы
     val existingActiveDF = filterActive(existingDF).
@@ -61,7 +62,7 @@ private class Scd2Processor(config: SCD2Config) {
   }
 
   /** Фильтрация неактивных записей */
-  private def filterNonActive(existingDF: DataFrame): DataFrame =
+  private def filterInactive(existingDF: DataFrame): DataFrame =
     existingDF.filter(Filters.isNonActualRecord(config.isActiveCol))
 
   /** Фильтрация активных записей */
@@ -169,11 +170,17 @@ object SCD2Processor extends App {
     technicalColumn = TechnicalColumns()
   )
 
-  private val processor = new Scd2Processor(scd2Config)
+  private val processor = new SCD2Processor(scd2Config)
 
   private val scd2DF = processor.process(historicalDF, incrementalDF)
 
-  scd2DF.show(truncate = false)
+  private val scd2WriteConfig = SCD2WriteConfig(
+    scd2DF,
+    "test",
+    SCD2PartitioningConfig("active_flg", Seq(0, 1))
+  )
+
+  SCD2Writer.write(scd2WriteConfig, spark)
 
   //Очистка кэша, если использовался во время активной сессии spark
   CacheManager.clearCache(spark) match {

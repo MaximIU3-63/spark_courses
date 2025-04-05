@@ -1,8 +1,9 @@
 package spark.scd2.load
 
 import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
-import spark.scd2.utils.{BackupManager, ErrorCollector, Filters, HdfsBackupManager, HdfsFileManager, Location}
+import spark.scd2.utils.{Active, BackupManager, ErrorCollector, Filters, HdfsBackupManager, HdfsFileManager, Inactive, Location, SCD2Defaults, SCD2PartitioningConfig}
 
 import java.net.URI
 import java.nio.file.Paths
@@ -13,14 +14,22 @@ import scala.util.{Failure, Success, Try}
 case class SCD2WriteConfig(
                             incomingScd2DF: DataFrame,
                             targetTableName: String,
-                            partitionMapColumnValues: (String, Seq[Int]) = "active_flg" -> Seq(0, 1)
+                            partitionConfig: SCD2PartitioningConfig = SCD2Defaults.DefaultPartition
                           )
 object SCD2Writer {
   def write(config: SCD2WriteConfig, spark: SparkSession): Unit = {
 
     // Формирование необходимых директорий для работы функционала
     val tableLocation = Location.getTableLocation(config.targetTableName, spark)
-    val targetPartition = Location.getSpecPartitionLocation(config.targetTableName, Map("active_flg" -> "1"), spark)
+
+    // Определяем расположение партиции с активными записями в HDFS
+    val targetPartition = {
+      Location.
+        getSpecPartitionLocation(
+          config.targetTableName,
+          Map(config.partitionConfig.colName -> Active.value),
+          spark)
+    }
 
     val localDateTime = LocalDateTime.now.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
 
@@ -42,13 +51,12 @@ object SCD2Writer {
     // Инициализация объекта скрытого класса SCD2Writer
     val scd2Writer = new SCD2Writer(fs, hdfsBackupManager)
 
-
     // 1. Отбор активных и неактивных записей из инкремента.
     val activeRecordsDF = scd2Writer.
-      filterActive(config.incomingScd2DF, config.partitionMapColumnValues._1)
+      filterByPartCol(config.incomingScd2DF, config.partitionConfig.colName, Active.value)
 
     val nonActiveRecordsDF = scd2Writer.
-      filterNonActive(config.incomingScd2DF, config.partitionMapColumnValues._1)
+      filterByPartCol(config.incomingScd2DF, config.partitionConfig.colName, Inactive.value)
 
     Try {
       // 2. Запись исторических данных
@@ -72,14 +80,18 @@ object SCD2Writer {
         hdfsBackupManager.restore(backupPath, targetPath, tempPath, fs)
     }
 
-    // Выход из приложения с ошибкой, если такова была в процессе работы.
+    // Выход из приложения с ошибкой, если таковы были в процессе работы.
     errorCollector.throwIfErrorsExists()
   }
 }
 
 private[scd2] class SCD2Writer(fs: FileSystem, backupManager: BackupManager) {
 
-  /** Формирование временной таблицы */
+  /**
+   * Создание временной таблицы
+   * @param incomingDF Входной дата фрейм данных
+   * @param tempPath Расположение временной таблицы в HDFS
+   */
   private def createTempTable(incomingDF: DataFrame, tempPath: String): Unit = {
     incomingDF.
       write.
@@ -87,13 +99,14 @@ private[scd2] class SCD2Writer(fs: FileSystem, backupManager: BackupManager) {
       mode(SaveMode.Overwrite).
       parquet(tempPath)
   }
-  /** Фильтрация неактивных записей */
-  private def filterNonActive(existingDF: DataFrame, partCol: String): DataFrame =
-    existingDF.filter(Filters.isNonActualRecord(partCol))
 
-  /** Фильтрация активных записей */
-  private def filterActive(existingDF: DataFrame, partCol: String): DataFrame =
-    existingDF.filter(Filters.isActualRecord(partCol))
+  /** Фильтрует записи по полю партиции.*/
+  private def filterByPartCol(
+                              existingDF: DataFrame,
+                              partCol: String,
+                              filteredValue: Int
+                            ): DataFrame =
+    existingDF.filter(col(partCol) === filteredValue)
 
   /**  Обработка архивных данных */
   private def processHistoricalData(incomingDF: DataFrame, tableName: String): Unit = {

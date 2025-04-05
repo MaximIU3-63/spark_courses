@@ -4,6 +4,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 
 trait BackupManager {
   def createBackup(backupPath: Path, targetPath: Path, fs: FileSystem): Unit
+
   def restore(
                backupPath: Path,
                targetPath: Path,
@@ -13,6 +14,7 @@ trait BackupManager {
 }
 
 class HdfsBackupManager(hdfsFileManager: HdfsFileManager) extends BackupManager {
+
   override def createBackup(backupPath: Path, targetPath: Path, fs: FileSystem): Unit = {
     if (fs.exists(targetPath)) {
       if (!fs.rename(targetPath, backupPath)) {

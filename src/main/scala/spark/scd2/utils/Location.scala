@@ -5,6 +5,7 @@ import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.functions.col
 
 object Location {
+
   def getTableLocation(tableName: String, spark: SparkSession): String = {
     val catalog = spark.sessionState.catalog
     val tableMetadata = catalog.getTableMetadata(TableIdentifier(tableName))
@@ -17,7 +18,7 @@ object Location {
     location
   }
 
-  def getSpecPartitionLocation(tableName: String, partitionSpec: Map[String, String], spark: SparkSession): String = {
+  def getSpecPartitionLocation(tableName: String, partitionSpec: Map[String, Int], spark: SparkSession): String = {
     val partLocation = spark.sql(
       s"""
          |DESC FORMATTED $tableName
