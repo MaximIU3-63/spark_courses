@@ -1,11 +1,11 @@
 package spark.scd2.utils
 
 case class SCD2PartitioningConfig(colName: String, allowedValues: Seq[Int]) {
-  require(allowedValues.nonEmpty, "Allowed values cannot be empty")
+  require(allowedValues.nonEmpty, Messages.requireMessage("allowedValues"))
 }
 
 sealed trait ActiveFlag {
-  def value: Int
+  val value: Int
 }
 
 case object Active extends ActiveFlag { val value = 1 }

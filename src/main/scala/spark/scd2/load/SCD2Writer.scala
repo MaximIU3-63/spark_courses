@@ -3,18 +3,18 @@ package spark.scd2.load
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
-import spark.scd2.utils.{Active, BackupManager, ErrorCollector, Filters, HdfsBackupManager, HdfsFileManager, Inactive, Location, SCD2Defaults, SCD2PartitioningConfig}
+import spark.scd2.utils.{Active, BackupManager, ErrorCollector, HdfsBackupManager, Inactive, Location, PathGenerator, SCD2Defaults, SCD2PartitioningConfig}
 
 import java.net.URI
 import java.nio.file.Paths
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 import scala.util.{Failure, Success, Try}
 
 case class SCD2WriteConfig(
                             incomingScd2DF: DataFrame,
                             targetTableName: String,
-                            partitionConfig: SCD2PartitioningConfig = SCD2Defaults.DefaultPartition
+                            partitionConfig: SCD2PartitioningConfig = SCD2Defaults.DefaultPartition,
+                            tempDirPattern: String = "_temp_active_",
+                            backupDirPattern: String = "_backup_active_"
                           )
 object SCD2Writer {
   def write(config: SCD2WriteConfig, spark: SparkSession): Unit = {
@@ -31,32 +31,33 @@ object SCD2Writer {
           spark)
     }
 
-    val localDateTime = LocalDateTime.now.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
-
-    val tempPartition = Paths.get(tableLocation, s"_temp_active_$localDateTime").toString
-    val backupPartition = Paths.get(tableLocation, s"_backup_active_$localDateTime").toString
+    val pathGenerator = new PathGenerator {}
 
     val targetPath = new Path(targetPartition)
-    val tempPath = new Path(tempPartition)
-    val backupPath = new Path(backupPartition)
+    val tempPath = new Path(pathGenerator.generateTempPath(tableLocation, config.tempDirPattern))
+    val backupPath = new Path(pathGenerator.generateTempPath(tableLocation, config.backupDirPattern))
 
     val fs = FileSystem.get(new URI(tableLocation), spark.sparkContext.hadoopConfiguration)
 
     // Инициализация объекта класса сбора ошибок.
     val errorCollector = new ErrorCollector()
-    // Инициализация объекта класса по работе файловой системой
-    val hdfsFileManager = new HdfsFileManager(fs)
     // Инициализация объекта класса по работе с бэкапом
-    val hdfsBackupManager = new HdfsBackupManager(hdfsFileManager)
+    val hdfsBackupManager = new HdfsBackupManager(fs)
     // Инициализация объекта скрытого класса SCD2Writer
     val scd2Writer = new SCD2Writer(fs, hdfsBackupManager)
 
     // 1. Отбор активных и неактивных записей из инкремента.
     val activeRecordsDF = scd2Writer.
-      filterByPartCol(config.incomingScd2DF, config.partitionConfig.colName, Active.value)
+      filterByPartitionValue(
+        config.incomingScd2DF,
+        config.partitionConfig.colName,
+        Active.value)
 
     val nonActiveRecordsDF = scd2Writer.
-      filterByPartCol(config.incomingScd2DF, config.partitionConfig.colName, Inactive.value)
+      filterByPartitionValue(
+        config.incomingScd2DF,
+        config.partitionConfig.colName,
+        Inactive.value)
 
     Try {
       // 2. Запись исторических данных
@@ -72,12 +73,18 @@ object SCD2Writer {
 
     } match {
       case Success(_) =>
-        hdfsFileManager.deletePath(tempPath)
-        hdfsFileManager.deletePath(backupPath)
+        if (fs.exists(tempPath) && !fs.delete(tempPath, true)) {
+          throw new RuntimeException(s"Error deleting $tempPath")
+        }
+
+        if (fs.exists(backupPath) && !fs.delete(backupPath, true)) {
+          throw new RuntimeException(s"Error deleting $backupPath")
+        }
 
       case Failure(e) =>
-        errorCollector.addError(e.getMessage)
-        hdfsBackupManager.restore(backupPath, targetPath, tempPath, fs)
+        errorCollector.addCriticalError(e.getMessage)
+        hdfsBackupManager.restore(backupPath, targetPath, tempPath)
+        throw e
     }
 
     // Выход из приложения с ошибкой, если таковы были в процессе работы.
@@ -101,12 +108,11 @@ private[scd2] class SCD2Writer(fs: FileSystem, backupManager: BackupManager) {
   }
 
   /** Фильтрует записи по полю партиции.*/
-  private def filterByPartCol(
-                              existingDF: DataFrame,
-                              partCol: String,
-                              filteredValue: Int
-                            ): DataFrame =
-    existingDF.filter(col(partCol) === filteredValue)
+  private def filterByPartitionValue(
+                                      df: DataFrame,
+                                      column: String,
+                                      value: Int
+                                    ): DataFrame = df.filter(col(column) === value)
 
   /**  Обработка архивных данных */
   private def processHistoricalData(incomingDF: DataFrame, tableName: String): Unit = {
@@ -128,7 +134,7 @@ private[scd2] class SCD2Writer(fs: FileSystem, backupManager: BackupManager) {
     createTempTable(incomingDF, tempPath.toString)
 
     // 2. Создание бэкапа
-    backupManager.createBackup(backupPath, targetPath, fs)
+    backupManager.createBackup(backupPath, targetPath)
 
     // 3. Атомарная замена партиций
     if(!fs.rename(tempPath, targetPath)) {
