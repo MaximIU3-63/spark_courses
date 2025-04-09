@@ -2,72 +2,67 @@ package spark.scd2
 
 import org.apache.spark.sql.functions.{coalesce, col, concat, current_date, current_timestamp, lit, sha1}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.storage.StorageLevel
-import spark.scd2.load.{SCD2WriteConfig, SCD2Writer}
-import spark.scd2.utils.{CacheManager, Constants, DateFormat, Dates, Filters, ISO_8601, ISO_8601_EXTENDED, Messages, SCD2PartitioningConfig}
+import scd2.utils.{Active, Constants, DateFormat, Dates, Filters, ISO_8601, ISO_8601_EXTENDED, Inactive, Messages, SCD2Defaults, SCD2PartitioningConfig}
 
-import scala.util.{Failure, Success}
-
-case class TechnicalColumns(sysdateDt: String = "sysdate_dt", sysdateDttm: String = "sysdate_dttm") {
-  // Формируем список технических колонок
-  val getParamsAsSeq: List[String] = this.productIterator.map(_.toString).toList
+//Трейт с описанием базовых технических полей
+trait BaseTechnicalColumns {
+  val sysDateColumnName: String
+  val sysDateDttmColumnName: String
 }
 
-private case class SCD2Config(
-                               primaryKeyColumns: Seq[String],
-                               sensitiveKeysColumns: Seq[String],
-                               effectiveDateFrom: String = "effective_from_dt",
-                               effectiveDateTo: String = "effective_to_dt",
-                               isActiveCol: String = "is_active",
-                               technicalColumn: TechnicalColumns
-                             ) {
+// Кейс класс, наследующий трейт с базовыми техническими полями и определяющих их наименование
+case class CurrentTechnicalColumns(
+                                 sysDateColumnName: String = "sysdate_dt",
+                                 sysDateDttmColumnName: String = "sysdate_dttm"
+                               ) extends BaseTechnicalColumns
+
+case class SCD2Config(
+                       primaryKeyColumns: Seq[String],
+                       sensitiveKeysColumns: Seq[String],
+                       effectiveDateFrom: String,
+                       effectiveDateTo: String,
+                       technicalColumn: BaseTechnicalColumns,
+                       partitionConfig: SCD2PartitioningConfig = SCD2Defaults.DefaultPartition
+                     ) {
   require(primaryKeyColumns.nonEmpty, Messages.requireMessage("primaryKeyColumns"))
   require(primaryKeyColumns.nonEmpty, Messages.requireMessage("sensitiveKeysColumns"))
   require(primaryKeyColumns.intersect(sensitiveKeysColumns).isEmpty, "Primary and sensitive columns must not overlap")
 }
 
-private class SCD2Processor(config: SCD2Config) {
+class SCD2Processor(config: SCD2Config) {
 
   /** Основной метод обработки SCD2 */
   def process(existingDF: DataFrame, incomingDF: DataFrame): DataFrame = {
-
-    // 1. Отбор строк, которые не требуется обрабатывать
-    val existingNoActiveDF = filterInactive(existingDF)
-
-    // 2. Отбор активных строк из существующей таблицы
-    val existingActiveDF = filterActive(existingDF).
+    // 1. Отбор активных строк из существующей таблицы
+    val existingActiveDF = Filters.filterByPartitionValue(
+        existingDF,
+        config.partitionConfig.colName,
+        Active.value).
       persist(StorageLevel.MEMORY_AND_DISK)
 
-    // 3. Формирование дата фрейма строк, где есть изменения
+    // 2. Формирование дата фрейма строк, где есть изменения
     val changesDF = detectChanges(existingActiveDF, incomingDF).
       persist(StorageLevel.MEMORY_AND_DISK)
 
-    // 4. Формирование дата фрейма с данными, для которых нет изменений
-    val unchangedActiveRecordsDF: DataFrame = getUnchangedActiveRecords(existingActiveDF, changesDF)
+    val existingActiveSchema: StructType = existingDF.schema
 
-    val existingSchema = existingDF.schema
+    // 3. Формивание датафрейма с активными записями для которых нет изменений
+    val unchangedActiveRecordsDF = castColumnsToTargetSchema(existingActiveSchema, getUnchangedActiveRecords(existingActiveDF, changesDF))
 
-    // 5. Формирование дата фрейма с данными, которые переходят в статус "неактуальные"
-    val updateExistingDF = castColumnsToTargetSchema(existingSchema, expireOldRecords(existingActiveDF, changesDF))
+    // 4. Формирование датафрейма с данными, которые переходят в статус "неактульные"
+    val updateExistingDF = castColumnsToTargetSchema(existingActiveSchema, expireOldRecords(existingActiveDF, changesDF))
 
-    // 6. Формирование дата фрейма с обновленными и новыми данными
-    val upsertRecordsDF = castColumnsToTargetSchema(existingSchema, prepareUpsertRecords(changesDF))
+    // 5. Формирование датафрейма с обновленными и новыми данными
+    val upsertRecordsDF = castColumnsToTargetSchema(existingActiveSchema, prepareUpsertRecords(changesDF))
 
-    // 7. Объединение все данных
-    val scd2DF = combineDataFrames(existingNoActiveDF, unchangedActiveRecordsDF, updateExistingDF, upsertRecordsDF)
+    // 6. Объединение все данных
+    val scd2DF = combineDataFrames(unchangedActiveRecordsDF, updateExistingDF, upsertRecordsDF)
 
-    // 8. Возврат результирующего дата фрейма
+    // 7. Возврат результирующего датафрейма
     scd2DF
   }
-
-  /** Фильтрация неактивных записей */
-  private def filterInactive(existingDF: DataFrame): DataFrame =
-    existingDF.filter(Filters.isNonActualRecord(config.isActiveCol))
-
-  /** Фильтрация активных записей */
-  private def filterActive(existingDF: DataFrame): DataFrame =
-    existingDF.filter(Filters.isActualRecord(config.isActiveCol))
 
   /** Детектирование изменений с использованием хеширования */
   private def detectChanges(existingDF: DataFrame, incomingDF: DataFrame): DataFrame = {
@@ -107,18 +102,20 @@ private class SCD2Processor(config: SCD2Config) {
       reduce(_ && _)
 
     existingActiveDF.join(changesDF, joinCondition, "left_semi").
-      withColumn(config.effectiveDateTo, DateFormat.formatDateColumn(current_date(), ISO_8601)).
-      withColumn(config.isActiveCol, lit("false"))
+      withColumn(config.effectiveDateTo, DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)).
+      withColumn(config.partitionConfig.colName, lit(Inactive.value)).
+      withColumn(config.technicalColumn.sysDateColumnName, lit(DateFormat.formatDateColumn(current_date(), ISO_8601))).
+      withColumn(config.technicalColumn.sysDateDttmColumnName, lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)))
   }
 
   /** Формирование дата фрейма с новыми и обновленными данными */
   private def prepareUpsertRecords(changesDF: DataFrame): DataFrame = {
     changesDF
-      .withColumn(config.effectiveDateFrom, lit(DateFormat.formatDateColumn(current_date(), ISO_8601)))
-      .withColumn(config.effectiveDateTo, lit(Dates.closeDateValue))
-      .withColumn(config.isActiveCol, lit("true"))
-      .withColumn(config.technicalColumn.sysdateDt, lit(DateFormat.formatDateColumn(current_date(), ISO_8601)))
-      .withColumn(config.technicalColumn.sysdateDttm, lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)))
+      .withColumn(config.effectiveDateFrom, lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)))
+      .withColumn(config.effectiveDateTo, lit(Dates.closeDateDttmValue))
+      .withColumn(config.partitionConfig.colName, lit(Active.value))
+      .withColumn(config.technicalColumn.sysDateColumnName, lit(DateFormat.formatDateColumn(current_date(), ISO_8601)))
+      .withColumn(config.technicalColumn.sysDateDttmColumnName, lit(DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)))
   }
 
   /** Объединение дата фреймов */
@@ -126,20 +123,22 @@ private class SCD2Processor(config: SCD2Config) {
     dfs.reduceLeft(_ unionByName _)
       .orderBy(config.primaryKeyColumns.map(col): _*)
 
-  private def castColumnsToTargetSchema(existingSrcSchema: StructType, incomingDF: DataFrame): DataFrame = {
-    val existingSchema = existingSrcSchema.map {
+  private def castColumnsToTargetSchema(existingSrcSchema: StructType, incomingDstDF: DataFrame): DataFrame = {
+    // Получаем схему целевого исходного датафрейма
+    val existingSchema = existingSrcSchema.fields.map(
       f => (f.name, f.dataType)
-    }.toMap
+    ).toMap
 
-    val incomingCastedDF = incomingDF.columns.map {
+    // Преобразуем схему конечного датафрейма к целевому
+    val incomingCastedColumns = incomingDstDF.columns.map {
       colName => existingSchema.get(colName) match {
-        case Some(colType) => incomingDF(colName).cast(colType).as(colName)
-        case None => incomingDF(colName)
+        case Some(colType) => incomingDstDF(colName).cast(colType).as(colName)
+        case None => incomingDstDF(colName)
       }
     }
 
-    incomingDF.
-      select(incomingCastedDF: _*).
+    incomingDstDF.
+      select(incomingCastedColumns: _*).
       select(existingSrcSchema.map(c => col(c.name)): _*)
   }
 }
