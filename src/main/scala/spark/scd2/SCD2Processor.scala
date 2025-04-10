@@ -1,10 +1,12 @@
 package spark.scd2
 
-import org.apache.spark.sql.functions.{coalesce, col, concat, current_date, current_timestamp, lit, sha1}
+import org.apache.spark.sql.functions.{col, concat, current_date, current_timestamp, lit, sha1}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.storage.StorageLevel
-import scd2.utils.{Active, Constants, DateFormat, Dates, Filters, ISO_8601, ISO_8601_EXTENDED, Inactive, Messages, SCD2Defaults, SCD2PartitioningConfig}
+import spark.scd2.utils.{Active, CacheManager, Constants, DateFormat, Dates, Filters, ISO_8601, ISO_8601_EXTENDED, Inactive, Messages, SCD2Defaults, SCD2PartitioningConfig}
+
+import scala.util.{Failure, Success}
 
 //Трейт с описанием базовых технических полей
 trait BaseTechnicalColumns {
@@ -12,12 +14,25 @@ trait BaseTechnicalColumns {
   val sysDateDttmColumnName: String
 }
 
-// Кейс класс, наследующий трейт с базовыми техническими полями и определяющих их наименование
+/**
+ * Кейс класс, наследующий трейт с базовыми техническими полями и определяющих их наименование
+ * @param sysDateColumnName - наименования системного поля в формате ISO-8601
+ * @param sysDateDttmColumnName - наименования системного поля в формате ISO-8601_EXTENDED
+ */
 case class CurrentTechnicalColumns(
-                                 sysDateColumnName: String = "sysdate_dt",
-                                 sysDateDttmColumnName: String = "sysdate_dttm"
-                               ) extends BaseTechnicalColumns
+                                    sysDateColumnName: String = "sysdate_dt",
+                                    sysDateDttmColumnName: String = "sysdate_dttm"
+                                  ) extends BaseTechnicalColumns
 
+/**
+ * Конфигуратор для SCD2
+ * @param primaryKeyColumns - массив primary полей для связи таблиц.
+ * @param sensitiveKeysColumns - массив чувствительных к изменению полей.
+ * @param effectiveDateFrom - наименование поля 'дата открытия' строки.
+ * @param effectiveDateTo - наименование поля 'даты закрытия' строки.
+ * @param technicalColumn - конфигуратор технических полей.
+ * @param partitionConfig - конфигуратор для поля партицирования: По умолчанию описан в SCD2Defaults.DefaultPartition
+ */
 case class SCD2Config(
                        primaryKeyColumns: Seq[String],
                        sensitiveKeysColumns: Seq[String],
@@ -75,13 +90,8 @@ class SCD2Processor(config: SCD2Config) {
     val incomingWithHashDF = incomingDF.
       select(incomingDF.columns.map(col) :+ sha1(concat(hashColumns: _*)).as(Constants.HASH_COLUMN): _*)
 
-    existingWithHashDF.alias("existing").
-      join(incomingWithHashDF.as("incoming"), config.primaryKeyColumns, "full_outer").
-      filter(coalesce(
-        existingWithHashDF(Constants.HASH_COLUMN) =!= incomingWithHashDF(Constants.HASH_COLUMN) &&
-          incomingWithHashDF(Constants.HASH_COLUMN).isNotNull,
-        existingWithHashDF(Constants.HASH_COLUMN).isNotNull || incomingWithHashDF(Constants.HASH_COLUMN).isNotNull
-      )).
+    incomingWithHashDF.alias("incoming").
+      join(existingWithHashDF.alias("existing"), Seq(Constants.HASH_COLUMN), "left_anti").
       select(incomingDF.columns.map(col): _*)
   }
 
@@ -96,12 +106,8 @@ class SCD2Processor(config: SCD2Config) {
 
   /** Закрытие устаревших записей */
   private def expireOldRecords(existingActiveDF: DataFrame, changesDF: DataFrame): DataFrame = {
-
-    val joinCondition = config.primaryKeyColumns.
-      map(colName => existingActiveDF(colName) <=> changesDF(colName)).
-      reduce(_ && _)
-
-    existingActiveDF.join(changesDF, joinCondition, "left_semi").
+    existingActiveDF.
+      join(changesDF, config.primaryKeyColumns, "left_semi").
       withColumn(config.effectiveDateTo, DateFormat.formatDateColumn(current_timestamp(), ISO_8601_EXTENDED)).
       withColumn(config.partitionConfig.colName, lit(Inactive.value)).
       withColumn(config.technicalColumn.sysDateColumnName, lit(DateFormat.formatDateColumn(current_date(), ISO_8601))).
@@ -123,23 +129,24 @@ class SCD2Processor(config: SCD2Config) {
     dfs.reduceLeft(_ unionByName _)
       .orderBy(config.primaryKeyColumns.map(col): _*)
 
-  private def castColumnsToTargetSchema(existingSrcSchema: StructType, incomingDstDF: DataFrame): DataFrame = {
+  /** Приведение полей дата фрейма к целевому маппингу и типу данных */
+  private def castColumnsToTargetSchema(prioritySchema: StructType, df: DataFrame): DataFrame = {
     // Получаем схему целевого исходного датафрейма
-    val existingSchema = existingSrcSchema.fields.map(
+    val existingSchema = prioritySchema.fields.map(
       f => (f.name, f.dataType)
     ).toMap
 
     // Преобразуем схему конечного датафрейма к целевому
-    val incomingCastedColumns = incomingDstDF.columns.map {
+    val incomingCastedColumns = df.columns.map {
       colName => existingSchema.get(colName) match {
-        case Some(colType) => incomingDstDF(colName).cast(colType).as(colName)
-        case None => incomingDstDF(colName)
+        case Some(colType) => df(colName).cast(colType).as(colName)
+        case None => df(colName)
       }
     }
 
-    incomingDstDF.
+    df.
       select(incomingCastedColumns: _*).
-      select(existingSrcSchema.map(c => col(c.name)): _*)
+      select(prioritySchema.map(c => col(c.name)): _*)
   }
 }
 
@@ -166,20 +173,23 @@ object SCD2Processor extends App {
   private val scd2Config = SCD2Config(
     primaryKeyColumns = Seq("user_id"),
     sensitiveKeysColumns = Seq("email", "address"),
-    technicalColumn = TechnicalColumns()
+    effectiveDateFrom = "effective_from_dttm",
+    effectiveDateTo = "effective_to_dttm",
+    technicalColumn = CurrentTechnicalColumns()
   )
 
   private val processor = new SCD2Processor(scd2Config)
 
   private val scd2DF = processor.process(historicalDF, incrementalDF)
 
-  private val scd2WriteConfig = SCD2WriteConfig(
-    scd2DF,
-    "test",
-    SCD2PartitioningConfig("active_flg", Seq(0, 1))
-  )
-
-  SCD2Writer.write(scd2WriteConfig, spark)
+  scd2DF.show(100)
+  //  private val scd2WriteConfig = SCD2WriteConfig(
+  //    scd2DF,
+  //    "test",
+  //    SCD2PartitioningConfig("active_flg", Seq(0, 1))
+  //  )
+  //
+  //  SCD2Writer.write(scd2WriteConfig, spark)
 
   //Очистка кэша, если использовался во время активной сессии spark
   CacheManager.clearCache(spark) match {

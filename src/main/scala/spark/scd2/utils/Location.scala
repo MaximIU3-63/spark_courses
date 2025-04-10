@@ -4,8 +4,10 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.functions.col
 
+/** Объект, реализующий методы, возвращающие путь до директории хранения объекта в HDFS */
 object Location {
 
+  // Формирование пути до директории хранения таблицы в HDFS
   def getTableLocation(tableName: String, spark: SparkSession): String = {
     val catalog = spark.sessionState.catalog
     val tableMetadata = catalog.getTableMetadata(TableIdentifier(tableName))
@@ -18,7 +20,8 @@ object Location {
     location
   }
 
-  def getSpecPartitionLocation(tableName: String, partitionSpec: Map[String, Int], spark: SparkSession): String = {
+  // Формирование пути до директории хранения партиции таблицы в HDFS
+  def getSpecPartitionLocation[T](tableName: String, partitionSpec: Map[String, T], spark: SparkSession): String = {
     val partLocation = spark.sql(
       s"""
          |DESC FORMATTED $tableName

@@ -4,6 +4,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 
 import java.io.IOException
 
+/** Трейт, реализующий интерфейс с методами создания бэкапа и восстановления из бэкапа */
 trait BackupManager {
   def createBackup(backupPath: Path, targetPath: Path): Unit
 
@@ -14,6 +15,10 @@ trait BackupManager {
              ): Unit
 }
 
+/**
+ * Класс, работают с файловой системой HDFS
+ * @param fs - объект класса FileSystem
+ */
 class HdfsBackupManager(fs: FileSystem) extends BackupManager {
 
   override def createBackup(backupPath: Path, targetPath: Path): Unit = {

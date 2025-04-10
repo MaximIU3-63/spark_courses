@@ -5,6 +5,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 
+/** Трейт, реализующий методы генерации уникальной директории в HDFS по заданным паттернам */
 trait PathGenerator {
   private val localDateTime = LocalDateTime.now.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
   private lazy val generateId: String = s"${localDateTime}_${UUID.randomUUID().toString}"
