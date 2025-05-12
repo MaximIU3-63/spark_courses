@@ -7,9 +7,13 @@ import java.util.UUID
 
 /** Трейт, реализующий методы генерации уникальной директории в HDFS по заданным паттернам */
 trait PathGenerator {
+  // Текущая дата в формате yyyyMMdd
   private val localDateTime = LocalDateTime.now.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+
+  // Уникальный идентификатор, состоящий из даты и случайного UUID
   private lazy val generateId: String = s"${localDateTime}_${UUID.randomUUID().toString}"
 
+  // Метод для генерации временного пути в HDFS на основе заданного расположения и паттерна
   def generateTempPath(location: String, pattern: String): String = {
     Paths.get(location, pattern + generateId).toString
   }

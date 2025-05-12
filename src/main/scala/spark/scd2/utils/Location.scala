@@ -23,10 +23,10 @@ object Location {
   // Формирование пути до директории хранения партиции таблицы в HDFS
   def getSpecPartitionLocation[T](tableName: String, partitionSpec: Map[String, T], spark: SparkSession): String = {
     val partLocation = spark.sql(
-      s"""
-         |DESC FORMATTED $tableName
-         |PARTITION (${partitionSpec.map(kv => s"${kv._1}='${kv._2}'").mkString(",")})
-         |""".stripMargin)
+        s"""
+           |DESC FORMATTED $tableName
+           |PARTITION (${partitionSpec.map(kv => s"${kv._1}='${kv._2}'").mkString(",")})
+           |""".stripMargin)
       .filter(col("col_name") === "Location")
       .select("data_type")
       .collect()
